@@ -10,7 +10,67 @@ on:
   workflow_dispatch:
 
 jobs:
-  deploy:
+
+  # -------------------------
+  # LINT
+  # -------------------------
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Pipenv
+        run: pip install pipenv
+
+      - name: Install dependencies
+        working-directory: starter/backend
+        run: pipenv install --dev --deploy
+
+      - name: Run lint
+        working-directory: starter/backend
+        run: pipenv run lint
+
+
+  # -------------------------
+  # TEST
+  # -------------------------
+  test:
+    needs: lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Pipenv
+        run: pip install pipenv
+
+      - name: Install dependencies
+        working-directory: starter/backend
+        run: pipenv install --dev --deploy
+
+      - name: Run tests
+        working-directory: starter/backend
+        run: pipenv run test
+
+
+  # -------------------------
+  # BUILD
+  # -------------------------
+  build:
+    needs: test
     runs-on: ubuntu-latest
 
     steps:
@@ -32,11 +92,36 @@ jobs:
       - name: Build backend Docker image
         working-directory: starter/backend
         run: |
-          docker build -t ${{ steps.login-ecr.outputs.registry }}/backend:latest .
+          docker build \
+            -t ${{ steps.login-ecr.outputs.registry }}/backend:latest .
 
       - name: Push backend image to ECR
         run: |
           docker push ${{ steps.login-ecr.outputs.registry }}/backend:latest
+
+
+  # -------------------------
+  # DEPLOY
+  # -------------------------
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Configure kubectl
         run: |
