@@ -1,12 +1,19 @@
-name: Backend Continuous Integration
+name: Backend Continuous Deployment
 
 on:
-  pull_request:
+  push:
     branches:
       - main
+    paths:
+      - 'starter/backend/**'
+      - '.github/workflows/backend-cd.yaml'
   workflow_dispatch:
 
 jobs:
+
+  # -------------------------
+  # LINT
+  # -------------------------
   lint:
     runs-on: ubuntu-latest
 
@@ -19,26 +26,23 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Cache pipenv
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('backend/Pipfile.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
       - name: Install Pipenv
         run: pip install pipenv
 
       - name: Install dependencies
-        working-directory: backend
+        working-directory: starter/backend
         run: pipenv install --dev --deploy
 
       - name: Run lint
-        working-directory: backend
+        working-directory: starter/backend
         run: pipenv run lint
 
+
+  # -------------------------
+  # TEST
+  # -------------------------
   test:
+    needs: lint
     runs-on: ubuntu-latest
 
     steps:
@@ -50,59 +54,86 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Cache pipenv
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('backend/Pipfile.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
       - name: Install Pipenv
         run: pip install pipenv
 
       - name: Install dependencies
-        working-directory: backend
+        working-directory: starter/backend
         run: pipenv install --dev --deploy
 
       - name: Run tests
-        working-directory: backend
+        working-directory: starter/backend
         run: pipenv run test
 
+
+  # -------------------------
+  # BUILD
+  # -------------------------
   build:
-    needs:
-      - lint
-      - test
+    needs: test
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          python-version: '3.10'
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
 
-      - name: Cache pipenv
-        uses: actions/cache@v4
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build backend Docker image
+        working-directory: starter/backend
+        run: |
+          docker build \
+            -t ${{ steps.login-ecr.outputs.registry }}/backend:latest .
+
+      - name: Push backend image to ECR
+        run: |
+          docker push ${{ steps.login-ecr.outputs.registry }}/backend:latest
+
+
+  # -------------------------
+  # DEPLOY
+  # -------------------------
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('backend/Pipfile.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
 
-      - name: Install Pipenv
-        run: pip install pipenv
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Install dependencies
-        working-directory: backend
-        run: pipenv install --dev --deploy
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region us-east-1 \
+            --name cluster
 
-      - name: Run tests
-        working-directory: backend
-        run: pipenv run test
+      - name: Update backend deployment
+        run: |
+          kubectl set image deployment/backend \
+            backend=${{ steps.login-ecr.outputs.registry }}/backend:latest
 
-      - name: Build Docker image
-        working-directory: backend
-        run: docker build -t mp-backend:latest .
+      - name: Wait for backend rollout
+        run: |
+          kubectl rollout status deployment/backend --timeout=5m
