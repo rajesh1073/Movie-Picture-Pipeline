@@ -4,59 +4,63 @@ on:
   push:
     branches:
       - main
-    paths:
-      - 'starter/frontend/**'
-      - '.github/workflows/frontend-cd.yaml'
   workflow_dispatch:
 
-jobs:
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: frontend
+  EKS_CLUSTER: cluster
 
-  lint:
+jobs:
+  test:
     runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: starter/frontend
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup NodeJS
         uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version-file: starter/frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: starter/frontend/package-lock.json
 
       - name: Install dependencies
-        working-directory: starter/frontend
-        run: npm install
+        run: npm ci
 
       - name: Run lint
-        working-directory: starter/frontend
         run: npm run lint
 
+      - name: Run tests
+        run: npm test
+        env:
+          CI: true
 
-  test:
-    needs: lint
+  build:
     runs-on: ubuntu-latest
+    needs: test
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
         with:
-          node-version: 18
-
-      - name: Install dependencies
-        working-directory: starter/frontend
-        run: npm install
-
-      - name: Run tests
-        working-directory: starter/frontend
-        run: CI=true npm test -- --watchAll=false
-
+          context: starter/frontend
+          push: false
+          build-args: |
+            REACT_APP_MOVIE_API_URL=http://a89d6b51ea4ba42eaa214277fd9a1d2f-331907667.us-east-1.elb.amazonaws.com
+          tags: frontend:${{ github.sha }}
 
   deploy:
-    needs: test
     runs-on: ubuntu-latest
+    needs: build
 
     steps:
       - name: Checkout code
@@ -67,35 +71,27 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: us-east-1
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build frontend Docker image
-        working-directory: starter/frontend
-        run: |
-          docker build \
-            --build-arg REACT_APP_MOVIE_API_URL=http://a0eed145dcc9246dc9a5c06530b3226e-309876200.us-east-1.elb.amazonaws.com \
-            -t ${{ steps.login-ecr.outputs.registry }}/frontend:latest .
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: starter/frontend
+          push: true
+          build-args: |
+            REACT_APP_MOVIE_API_URL=http://a89d6b51ea4ba42eaa214277fd9a1d2f-331907667.us-east-1.elb.amazonaws.com
+          tags: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
 
-      - name: Push frontend image to ECR
-        run: |
-          docker push ${{ steps.login-ecr.outputs.registry }}/frontend:latest
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER }} --region ${{ env.AWS_REGION }}
 
-      - name: Configure kubectl
+      - name: Deploy to Kubernetes
         run: |
-          aws eks update-kubeconfig \
-            --region us-east-1 \
-            --name cluster
-
-      - name: Update frontend deployment
-        run: |
+          kubectl apply -k starter/frontend/k8s
           kubectl set image deployment/frontend \
-            frontend=${{ steps.login-ecr.outputs.registry }}/frontend:latest
-
-      - name: Wait for frontend rollout
-        run: |
-          kubectl rollout status deployment/frontend --timeout=5m
+            frontend=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          kubectl rollout status deployment/frontend
