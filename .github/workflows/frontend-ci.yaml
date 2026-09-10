@@ -1,19 +1,19 @@
-name: Frontend Continuous Deployment
+name: Frontend Continuous Integration
 
 on:
-  push:
+  pull_request:
     branches:
       - main
-    paths:
-      - 'starter/frontend/**'
-      - '.github/workflows/frontend-cd.yaml'
   workflow_dispatch:
 
 jobs:
-
   lint:
     runs-on: ubuntu-latest
 
+    defaults:
+      run:
+        working-directory: starter/frontend
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -21,20 +21,22 @@ jobs:
       - name: Setup NodeJS
         uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version-file: starter/frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: starter/frontend/package-lock.json
 
       - name: Install dependencies
-        working-directory: starter/frontend
         run: npm ci
 
       - name: Run lint
-        working-directory: starter/frontend
         run: npm run lint
 
-
   test:
-    needs: lint
     runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: starter/frontend
 
     steps:
       - name: Checkout code
@@ -43,80 +45,53 @@ jobs:
       - name: Setup NodeJS
         uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version-file: starter/frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: starter/frontend/package-lock.json
 
       - name: Install dependencies
-        working-directory: starter/frontend
         run: npm ci
 
       - name: Run tests
-        working-directory: starter/frontend
-        run: npm run test -- --watchAll=false
-
+        run: npm test
+        env:
+          CI: true
 
   build:
-    needs: test
     runs-on: ubuntu-latest
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+    needs:
+      - lint
+      - test
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: us-east-1
-
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build frontend Docker image
+    defaults:
+      run:
         working-directory: starter/frontend
-        run: |
-          docker build \
-            --build-arg REACT_APP_MOVIE_API_URL=http://a0eed145dcc9246dc9a5c06530b3226e-309876200.us-east-1.elb.amazonaws.com \
-            -t ${{ steps.login-ecr.outputs.registry }}/frontend:latest .
-
-      - name: Push frontend image to ECR
-        run: |
-          docker push ${{ steps.login-ecr.outputs.registry }}/frontend:latest
-
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Setup NodeJS
+        uses: actions/setup-node@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: us-east-1
+          node-version-file: starter/frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: starter/frontend/package-lock.json
 
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Configure kubectl
-        run: |
-          aws eks update-kubeconfig \
-            --region us-east-1 \
-            --name cluster
+      - name: Run tests
+        run: npm test
+        env:
+          CI: true
 
-      - name: Update frontend deployment
-        run: |
-          kubectl set image deployment/frontend \
-            frontend=${{ steps.login-ecr.outputs.registry }}/frontend:latest
-
-      - name: Wait for frontend rollout
-        run: |
-          kubectl rollout status deployment/frontend --timeout=5m
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: starter/frontend
+          push: false
+          build-args: |
+            REACT_APP_MOVIE_API_URL=http://localhost:5000
+          tags: mp-frontend:latest
